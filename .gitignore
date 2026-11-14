@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+.DS_Store
+logs/
+src/main_backup.py
+src/main_backup_before_modular.py
+src/main_before_logger.py
