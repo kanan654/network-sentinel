@@ -1,10 +1,20 @@
 import asyncio
+import os
+import secrets
 from contextlib import suppress
+from ipaddress import IPv4Address
+from typing import Literal
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    HTTPException,
+    Header
+)
 from fastapi.staticfiles import StaticFiles
-from scapy.all import AsyncSniffer
-
+from pydantic import BaseModel, Field
+from scapy.all import IP, TCP, UDP, ICMP
 
 from src import main as engine
 
@@ -15,14 +25,39 @@ app = FastAPI(
     version="1.0.0"
 )
 
-sniffer = None
-event_loop = None
 connected_clients = set()
+event_loop = None
 
+
+# ==========================================
+# SENSOR DATA MODELS
+# ==========================================
+
+class SensorPacket(BaseModel):
+    source_ip: IPv4Address
+    destination_ip: IPv4Address
+    protocol: Literal["TCP", "UDP", "ICMP", "OTHER"]
+
+    source_port: int | None = Field(default=None, ge=0, le=65535)
+    destination_port: int | None = Field(default=None, ge=0, le=65535)
+
+    tcp_flags: list[
+        Literal["FIN", "SYN", "RST", "PSH", "ACK", "URG"]
+    ] = Field(default_factory=list, max_length=6)
+
+    icmp_type: int | None = Field(default=None, ge=0, le=255)
+    icmp_code: int | None = Field(default=None, ge=0, le=255)
+
+
+class SensorBatch(BaseModel):
+    packets: list[SensorPacket] = Field(min_length=1, max_length=200)
+
+
+# ==========================================
+# EVENT BROADCASTING
+# ==========================================
 
 def publish_event(event):
-    """Called by the packet-processing thread."""
-
     if event_loop and event_loop.is_running():
         event_loop.call_soon_threadsafe(
             broadcast_event,
@@ -31,8 +66,6 @@ def publish_event(event):
 
 
 def broadcast_event(event):
-    """Push events into connected WebSocket queues."""
-
     for queue in list(connected_clients):
         if queue.full():
             with suppress(asyncio.QueueEmpty):
@@ -40,6 +73,10 @@ def broadcast_event(event):
 
         queue.put_nowait(event)
 
+
+# ==========================================
+# STARTUP / SHUTDOWN
+# ==========================================
 
 @app.on_event("startup")
 async def startup():
@@ -49,21 +86,31 @@ async def startup():
     engine.event_logger.add_listener(publish_event)
 
     print("NETWORK SENTINEL API READY")
+    print("REMOTE PACKET CAPTURE DISABLED")
+    print("WAITING FOR AUTHENTICATED SENSOR")
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    await stop_capture()
     engine.event_logger.remove_listener(publish_event)
 
+
+# ==========================================
+# HEALTH
+# ==========================================
 
 @app.get("/api/health")
 async def health():
     return {
         "status": "healthy",
-        "monitoring": bool(sniffer and sniffer.running)
+        "monitoring": True,
+        "capture_mode": "remote_sensor"
     }
 
+
+# ==========================================
+# STATS
+# ==========================================
 
 @app.get("/api/stats")
 async def get_stats():
@@ -84,6 +131,10 @@ async def get_stats():
     }
 
 
+# ==========================================
+# EVENTS
+# ==========================================
+
 @app.get("/api/events")
 async def get_events(limit: int = 100):
     limit = max(1, min(limit, 500))
@@ -102,65 +153,112 @@ async def get_incidents():
     }
 
 
+# ==========================================
+# MONITOR STATUS
+# ==========================================
+
 @app.get("/api/monitor/status")
 async def monitor_status():
     return {
-        "running": bool(sniffer and sniffer.running),
-        "interface": engine.INTERFACE,
-        "capture_duration": engine.CAPTURE_DURATION
+        "running": True,
+        "interface": "remote sensor",
+        "capture_duration": engine.CAPTURE_DURATION,
+        "capture_mode": "remote_sensor"
     }
-
-
-async def stop_capture():
-    global sniffer
-
-    if sniffer and sniffer.running:
-        current_sniffer = sniffer
-        sniffer = None
-        current_sniffer.stop(join=True)
-
-    return {"status": "stopped"}
 
 
 @app.post("/api/monitor/start")
 async def start_capture():
-    global sniffer
-
-    if sniffer and sniffer.running:
-        return {
-            "status": "already_running",
-            "interface": engine.INTERFACE
-        }
-
-    try:
-        sniffer = AsyncSniffer(
-            iface=engine.INTERFACE,
-            prn=engine.process_packet,
-            store=False
-        )
-
-        sniffer.start()
-
-        return {
-            "status": "started",
-            "interface": engine.INTERFACE
-        }
-
-    except Exception as error:
-        sniffer = None
-
-        return {
-            "status": "error",
-            "message": str(error)
-        }
+    return {
+        "status": "disabled",
+        "message": "Start the local sensor on your WSL machine."
+    }
 
 
 @app.post("/api/monitor/stop")
 async def stop_monitor():
-    await stop_capture()
+    return {
+        "status": "disabled",
+        "message": "Stop the local sensor on your WSL machine."
+    }
 
-    return {"status": "stopped"}
 
+# ==========================================
+# AUTHENTICATED SENSOR INGESTION
+# ==========================================
+
+@app.post("/api/sensor/packets")
+def receive_sensor_packets(
+    batch: SensorBatch,
+    x_sensor_key: str = Header(default="", alias="X-Sensor-Key")
+):
+    expected_key = os.getenv("SENSOR_API_KEY", "")
+
+    if not expected_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Sensor authentication is not configured"
+        )
+
+    if not secrets.compare_digest(x_sensor_key, expected_key):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid sensor authentication"
+        )
+
+    flag_values = {
+        "FIN": 0x01,
+        "SYN": 0x02,
+        "RST": 0x04,
+        "PSH": 0x08,
+        "ACK": 0x10,
+        "URG": 0x20
+    }
+
+    processed = 0
+
+    for item in batch.packets:
+        packet = IP(
+            src=str(item.source_ip),
+            dst=str(item.destination_ip)
+        )
+
+        if item.protocol == "TCP":
+            flags = sum(
+                flag_values[flag]
+                for flag in item.tcp_flags
+            )
+
+            packet = packet / TCP(
+                sport=item.source_port or 0,
+                dport=item.destination_port or 0,
+                flags=flags
+            )
+
+        elif item.protocol == "UDP":
+            packet = packet / UDP(
+                sport=item.source_port or 0,
+                dport=item.destination_port or 0
+            )
+
+        elif item.protocol == "ICMP":
+            packet = packet / ICMP(
+                type=item.icmp_type if item.icmp_type is not None else 8,
+                code=item.icmp_code if item.icmp_code is not None else 0
+            )
+
+        engine.process_packet(packet)
+        processed += 1
+
+    return {
+        "status": "received",
+        "packets_processed": processed
+    }
+
+
+# ==========================================
+# WEBSOCKET
+# ==========================================
 
 @app.websocket("/ws/events")
 async def websocket_events(websocket: WebSocket):
@@ -190,7 +288,10 @@ async def websocket_events(websocket: WebSocket):
         connected_clients.discard(queue)
 
 
-# Serve React frontend
+# ==========================================
+# FRONTEND
+# ==========================================
+
 app.mount(
     "/",
     StaticFiles(directory="dashboard/dist", html=True),
