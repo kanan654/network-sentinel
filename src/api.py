@@ -2,6 +2,7 @@ import asyncio
 from contextlib import suppress
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 from scapy.all import AsyncSniffer
 
 
@@ -54,16 +55,6 @@ async def startup():
 async def shutdown():
     await stop_capture()
     engine.event_logger.remove_listener(publish_event)
-
-
-@app.get("/")
-async def root():
-    return {
-        "name": "Network Sentinel",
-        "status": "online",
-        "version": "1.0.0",
-        "documentation": "/docs"
-    }
 
 
 @app.get("/api/health")
@@ -197,3 +188,11 @@ async def websocket_events(websocket: WebSocket):
 
     finally:
         connected_clients.discard(queue)
+
+
+# Serve React frontend
+app.mount(
+    "/",
+    StaticFiles(directory="dashboard/dist", html=True),
+    name="dashboard"
+)
