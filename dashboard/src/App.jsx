@@ -65,17 +65,18 @@ function App() {
       fetch(`${API}/api/health`),
     ])
 
-      if (![statsRes, eventsRes, incidentsRes, monitorRes, healthRes].every(r => r.ok)) {
+      if (![statsRes, packetsRes, eventsRes, incidentsRes, monitorRes, healthRes].every(r => r.ok)) {
         throw new Error('One or more API endpoints returned an error')
       }
 
-      const [statsData, eventsData, incidentsData, monitorData] =
-        await Promise.all([
-          statsRes.json(),
-          eventsRes.json(),
-          incidentsRes.json(),
-          monitorRes.json(),
-        ])
+      const [statsData, packetsData, eventsData, incidentsData, monitorData] =
+  await Promise.all([
+    statsRes.json(),
+    packetsRes.json(),
+    eventsRes.json(),
+    incidentsRes.json(),
+    monitorRes.json(),
+  ])
 
       setStats(statsData)
       setPackets(Array.isArray(packetsData.packets) ? packetsData.packets : [])
