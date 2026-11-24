@@ -39,6 +39,7 @@ def capture_packet(packet):
     data = {
         "source_ip": ip.src,
         "destination_ip": ip.dst,
+        "packet_size": len(packet),
         "protocol": "OTHER",
         "source_port": None,
         "destination_port": None,

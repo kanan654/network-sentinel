@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, ArrowUp, Globe, Network,
   Play, Radio, RefreshCw, Shield, ShieldAlert, Square, Wifi,
@@ -34,6 +34,7 @@ function getEventDescription(event) {
 
 function App() {
   const [stats, setStats] = useState(null)
+  const [packets, setPackets] = useState([])
   const [events, setEvents] = useState([])
   const [incidents, setIncidents] = useState([])
   const [monitor, setMonitor] = useState(null)
@@ -43,17 +44,26 @@ function App() {
   const [actionLoading, setActionLoading] = useState(false)
   const [error, setError] = useState('')
   const [history, setHistory] = useState([])
+  const [activeSection, setActiveSection] = useState('Overview')
+  const [refreshing, setRefreshing] = useState(false)
+
+  const refreshInFlight = useRef(false)
 
   const refreshData = useCallback(async () => {
+    if (refreshInFlight.current) return
+    refreshInFlight.current = true
+    setRefreshing(true)
+
     try {
-      const [statsRes, eventsRes, incidentsRes, monitorRes, healthRes] =
-        await Promise.all([
-          fetch(`${API}/api/stats`),
-          fetch(`${API}/api/events?limit=50`),
-          fetch(`${API}/api/incidents`),
-          fetch(`${API}/api/monitor/status`),
-          fetch(`${API}/api/health`),
-        ])
+  const [statsRes, packetsRes, eventsRes, incidentsRes, monitorRes, healthRes] =
+    await Promise.all([
+      fetch(`${API}/api/stats`),
+      fetch(`${API}/api/packets?limit=50`),
+      fetch(`${API}/api/events?limit=50`),
+      fetch(`${API}/api/incidents`),
+      fetch(`${API}/api/monitor/status`),
+      fetch(`${API}/api/health`),
+    ])
 
       if (![statsRes, eventsRes, incidentsRes, monitorRes, healthRes].every(r => r.ok)) {
         throw new Error('One or more API endpoints returned an error')
@@ -65,14 +75,14 @@ function App() {
           eventsRes.json(),
           incidentsRes.json(),
           monitorRes.json(),
-          healthRes.json(),
         ])
 
       setStats(statsData)
+      setPackets(Array.isArray(packetsData.packets) ? packetsData.packets : [])
       setEvents(Array.isArray(eventsData.events) ? eventsData.events.slice().reverse() : [])
       setIncidents(Array.isArray(incidentsData.incidents) ? incidentsData.incidents.slice().reverse() : [])
       setMonitor(monitorData)
-      setApiOnline(healthRes.ok)
+      setApiOnline(true)
       setHistory(previous => [
         ...previous.slice(-29),
         {
@@ -86,21 +96,25 @@ function App() {
       setError(err.message || 'Unable to connect to backend')
     } finally {
       setLoading(false)
+      setRefreshing(false)
+      refreshInFlight.current = false
     }
   }, [])
 
   useEffect(() => {
-    const initialTimer = setTimeout(() => {
-      refreshData()
-    }, 0)
+    let stopped = false
+    let timer
 
-    const timer = setInterval(() => {
-      refreshData()
-    }, 2000)
+    const poll = async () => {
+      if (stopped) return
+      await refreshData()
+      if (!stopped) timer = setTimeout(poll, 2000)
+    }
 
+    poll()
     return () => {
-      clearTimeout(initialTimer)
-      clearInterval(timer)
+      stopped = true
+      clearTimeout(timer)
     }
   }, [refreshData])
 
@@ -179,10 +193,10 @@ function App() {
         </div>
 
         <div className="nav-label">MONITORING</div>
-        <div className="nav-item active"><Activity size={18} /> Overview</div>
-        <div className="nav-item"><ShieldAlert size={18} /> Threat events</div>
-        <div className="nav-item"><Network size={18} /> Network traffic</div>
-        <div className="nav-item"><Globe size={18} /> IP intelligence</div>
+        <button className={`nav-item ${activeSection === "Overview" ? "active" : ""}`} onClick={() => setActiveSection("Overview")}><Activity size={18} /> Overview</button>
+        <button className={`nav-item ${activeSection === "Threat events" ? "active" : ""}`} onClick={() => setActiveSection("Threat events")}><ShieldAlert size={18} /> Threat events</button>
+        <button className={`nav-item ${activeSection === "Network traffic" ? "active" : ""}`} onClick={() => setActiveSection("Network traffic")}><Network size={18} /> Network traffic</button>
+        <button className={`nav-item ${activeSection === "IP intelligence" ? "active" : ""}`} onClick={() => setActiveSection("IP intelligence")}><Globe size={18} /> IP intelligence</button>
 
         <div className="sidebar-bottom">
           <div className="system-card">
@@ -199,14 +213,14 @@ function App() {
         <header className="topbar">
           <div>
             <div className="eyebrow">SECURITY OPERATIONS CENTER</div>
-            <h1>Network Overview</h1>
+            <h1>{activeSection === "Overview" ? "Network Overview" : activeSection}</h1>
           </div>
           <div className="topbar-right">
             <div className={`connection ${apiOnline ? 'online' : 'offline'}`}>
               <span /> {apiOnline ? 'API CONNECTED' : 'API OFFLINE'}
             </div>
-            <button className="icon-button" onClick={refreshData} title="Refresh data">
-              <RefreshCw size={17} />
+            <button className="icon-button" onClick={refreshData} disabled={refreshing} title="Refresh data">
+              <RefreshCw size={17} className={refreshing ? "refreshing" : ""} />
             </button>
           </div>
         </header>
@@ -253,7 +267,7 @@ function App() {
             status={running} />
         </section>
 
-        <section className="content-grid">
+        <section className="content-grid" style={{ display: activeSection === "Overview" || activeSection === "Network traffic" ? undefined : "none" }}>
           <div className="panel traffic-panel">
             <PanelHeading title="Network traffic" subtitle="Packet count snapshots · refreshes every 2 seconds" />
             <div className="chart-area">
@@ -312,7 +326,7 @@ function App() {
           </div>
         </section>
 
-        <section className="content-grid lower-grid">
+        <section className="content-grid lower-grid" style={{ display: activeSection === "Overview" || activeSection === "Threat events" ? undefined : "none" }}>
           <div className="panel events-panel">
             <PanelHeading title="Recent security events" subtitle="Latest events from the detection engine">
               <span className="live-label"><i /> LIVE</span>
@@ -354,8 +368,65 @@ function App() {
             )) : <EmptyState text="No port statistics available." />}
           </div>
         </section>
+                  <section style={{ display: activeSection === "Network traffic" ? undefined : "none" }}>
+            <div className="panel" style={{ marginBottom: 20 }}>
+              <PanelHeading
+                title="Live Packet Capture"
+                subtitle={`Showing latest ${packets.length} packets · Refreshes every 2 seconds`}
+              />
 
-        <section className="content-grid lower-grid">
+              <div style={{ overflowX: "auto" }}>
+                <table style={{
+                  width: "100%",
+                  borderCollapse: "collapse",
+                  fontSize: "12px",
+                  textAlign: "left",
+                  whiteSpace: "nowrap"
+                }}>
+                  <thead>
+                    <tr style={{ color: "#7e8da4", borderBottom: "1px solid #26364d" }}>
+                      <th style={{ padding: "12px 10px" }}>TIME</th>
+                      <th style={{ padding: "12px 10px" }}>SOURCE IP</th>
+                      <th style={{ padding: "12px 10px" }}>SRC PORT</th>
+                      <th style={{ padding: "12px 10px" }}>DESTINATION IP</th>
+                      <th style={{ padding: "12px 10px" }}>DST PORT</th>
+                      <th style={{ padding: "12px 10px" }}>PROTOCOL</th>
+                      <th style={{ padding: "12px 10px" }}>TCP FLAGS</th>
+                      <th style={{ padding: "12px 10px" }}>SIZE</th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+                    {packets.length ? packets.map((packet, index) => (
+                      <tr key={`${packet.timestamp}-${index}`}
+                        style={{ borderBottom: "1px solid #202d40" }}>
+                        <td style={{ padding: "11px 10px", color: "#9aabc1" }}>
+                          {new Date(packet.timestamp * 1000).toLocaleTimeString()}
+                        </td>
+                        <td style={{ padding: "11px 10px" }}>{packet.source_ip}</td>
+                        <td style={{ padding: "11px 10px" }}>{packet.source_port ?? "—"}</td>
+                        <td style={{ padding: "11px 10px" }}>{packet.destination_ip}</td>
+                        <td style={{ padding: "11px 10px" }}>{packet.destination_port ?? "—"}</td>
+                        <td style={{ padding: "11px 10px" }}>{packet.protocol}</td>
+                        <td style={{ padding: "11px 10px" }}>
+                          {packet.tcp_flags?.length ? packet.tcp_flags.join(", ") : "—"}
+                        </td>
+                        <td style={{ padding: "11px 10px" }}>{packet.packet_size ?? 0} B</td>
+                      </tr>
+                    )) : (
+                      <tr>
+                        <td colSpan={8} style={{ padding: 30, textAlign: "center", color: "#7e8da4" }}>
+                          Waiting for packets from the sensor…
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+        <section className="content-grid lower-grid" style={{ display: activeSection === "Overview" || activeSection === "IP intelligence" ? undefined : "none" }}>
           <div className="panel">
             <PanelHeading title="Recent incidents" subtitle="Latest recorded security incidents" />
             {incidents.length ? incidents.slice(0, 5).map((incident, index) => (

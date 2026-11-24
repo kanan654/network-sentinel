@@ -1,6 +1,8 @@
+from collections import deque
 import asyncio
 import os
 import secrets
+import time
 from contextlib import suppress
 from ipaddress import IPv4Address
 from typing import Literal
@@ -27,6 +29,9 @@ app = FastAPI(
 
 connected_clients = set()
 event_loop = None
+sensor_last_seen = None
+SENSOR_TIMEOUT = 30
+recent_packets = deque(maxlen=200)
 
 
 # ==========================================
@@ -36,6 +41,7 @@ event_loop = None
 class SensorPacket(BaseModel):
     source_ip: IPv4Address
     destination_ip: IPv4Address
+    packet_size: int = Field(default=0, ge=0, le=65535)
     protocol: Literal["TCP", "UDP", "ICMP", "OTHER"]
 
     source_port: int | None = Field(default=None, ge=0, le=65535)
@@ -103,7 +109,11 @@ async def shutdown():
 async def health():
     return {
         "status": "healthy",
-        "monitoring": True,
+        "api_online": True,
+        "sensor_online": (
+            sensor_last_seen is not None
+            and (time.monotonic() - sensor_last_seen) < SENSOR_TIMEOUT
+        ),
         "capture_mode": "remote_sensor"
     }
 
@@ -111,7 +121,14 @@ async def health():
 # ==========================================
 # STATS
 # ==========================================
+@app.get("/api/packets")
+async def get_packets(limit: int = 50):
+    limit = max(1, min(limit, 200))
 
+    return {
+        "total": len(recent_packets),
+        "packets": list(reversed(list(recent_packets)))[0:limit]
+    }
 @app.get("/api/stats")
 async def get_stats():
     return {
@@ -159,11 +176,20 @@ async def get_incidents():
 
 @app.get("/api/monitor/status")
 async def monitor_status():
+    online = (
+        sensor_last_seen is not None
+        and (time.monotonic() - sensor_last_seen) < SENSOR_TIMEOUT
+    )
     return {
-        "running": True,
+        "running": online,
+        "sensor_online": online,
         "interface": "remote sensor",
         "capture_duration": engine.CAPTURE_DURATION,
-        "capture_mode": "remote_sensor"
+        "capture_mode": "remote_sensor",
+        "last_seen_seconds_ago": (
+            round(time.monotonic() - sensor_last_seen, 1)
+            if sensor_last_seen is not None else None
+        )
     }
 
 
@@ -192,6 +218,7 @@ def receive_sensor_packets(
     batch: SensorBatch,
     x_sensor_key: str = Header(default="", alias="X-Sensor-Key")
 ):
+    global sensor_last_seen
     expected_key = os.getenv("SENSOR_API_KEY", "")
 
     if not expected_key:
@@ -248,7 +275,21 @@ def receive_sensor_packets(
             )
 
         engine.process_packet(packet)
+        recent_packets.append({
+            "timestamp": time.time(),
+            "source_ip": str(item.source_ip),
+            "destination_ip": str(item.destination_ip),
+            "packet_size": item.packet_size,
+            "protocol": item.protocol,
+            "source_port": item.source_port,
+            "destination_port": item.destination_port,
+            "tcp_flags": item.tcp_flags,
+            "icmp_type": item.icmp_type,
+            "icmp_code": item.icmp_code
+        })
         processed += 1
+
+    sensor_last_seen = time.monotonic()
 
     return {
         "status": "received",
